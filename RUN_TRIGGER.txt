@@ -1,0 +1,2 @@
+trigger=2026-08-19T22:36+08:00
+purpose=final JI3 NCA fsQCA rerun
