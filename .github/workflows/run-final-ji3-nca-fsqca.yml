@@ -1,0 +1,164 @@
+name: Final JI3 NCA fsQCA 20260819
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  final-ji3-set-methods:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      TZ: Asia/Seoul
+      SOURCE_COMMIT: 1e9d9717b83cc12fc263a73df25ba8df4a057abc
+
+    steps:
+      - name: Checkout temporary public controller
+        uses: actions/checkout@v4
+
+      - name: Checkout exact private PR36 source commit
+        uses: actions/checkout@v4
+        with:
+          repository: zouqifan51-byte/digital_labor_sem_nca_fsqca_ji_onedim
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ secrets.SOURCE_REPO_PAT }}
+          path: source
+          persist-credentials: false
+
+      - name: Set up R 4.3.3
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: '4.3.3'
+          use-public-rspm: true
+
+      - name: Install the same primary R packages used by the locked runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          Rscript --vanilla - <<'RS'
+          options(repos = c(CRAN = "https://cloud.r-project.org"), timeout = 1200)
+          if (!requireNamespace("remotes", quietly = TRUE)) install.packages("remotes")
+          wanted <- c(jsonlite="1.8.8", NCA="5.0.2", QCA="3.25", Rcpp="1.1.2")
+          for (p in names(wanted)) {
+            ok <- requireNamespace(p, quietly=TRUE) && as.character(packageVersion(p)) == wanted[[p]]
+            if (!ok) remotes::install_version(p, version=wanted[[p]], dependencies=TRUE, upgrade="never")
+          }
+          stopifnot(
+            as.character(packageVersion("jsonlite")) == "1.8.8",
+            as.character(packageVersion("NCA")) == "5.0.2",
+            as.character(packageVersion("QCA")) == "3.25",
+            as.character(packageVersion("Rcpp")) == "1.1.2"
+          )
+          cat("R=", R.version.string, "\n")
+          cat("jsonlite=", as.character(packageVersion("jsonlite")),
+              " NCA=", as.character(packageVersion("NCA")),
+              " QCA=", as.character(packageVersion("QCA")),
+              " Rcpp=", as.character(packageVersion("Rcpp")), "\n")
+          RS
+
+      - name: Prepare exact locked H1449 and H1565 inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check pandas
+          python3 - <<'PY'
+          import pandas as pd
+          from pathlib import Path
+          import os, json
+          src = Path('source/hssc_handoff_v1/data/analysis_ji_onedim_sem.dta')
+          d = pd.read_stata(src, convert_categoricals=False)
+          d = d.loc[(d['sem_control_fe_rowmiss'] == 0) & d['siteid'].notna()].copy()
+          assert len(d) == 1449, len(d)
+          assert d['siteid'].nunique() == 124, d['siteid'].nunique()
+          needed = ['b28_1','b28_2','b28_3','b28_4','b28_5','b26_2','b26_3','WB','EE','siteid']
+          missing = [x for x in needed if x not in d.columns]
+          assert not missing, missing
+          out = Path(os.environ['RUNNER_TEMP']) / 'final_ji3_h1449.csv'
+          d.to_csv(out, index=False)
+          print(json.dumps({'H1449_N':len(d),'sites':int(d['siteid'].nunique()),'output':str(out)}))
+          PY
+          python3 source/analysis/support_req_abcdef_full_sem_20260811/prepare_locked_n1565_input.py \
+            --input source/data/source_copy.dta \
+            --output "$RUNNER_TEMP/final_ji3_h1565.csv" \
+            --audit "$RUNNER_TEMP/final_ji3_h1565_audit.json"
+          cat "$RUNNER_TEMP/final_ji3_h1565_audit.json"
+
+      - name: Execute the Work-built engine with JI3-only patch wrapper
+        working-directory: source
+        shell: bash
+        env:
+          H_DUAL_INPUT_1449: ${{ runner.temp }}/final_ji3_h1449.csv
+          H_DUAL_INPUT_1565: ${{ runner.temp }}/final_ji3_h1565.csv
+          H_DUAL_SET_OUT: ${{ runner.temp }}/final_ji3_results
+        run: |
+          set -euo pipefail
+          mkdir -p "$H_DUAL_SET_OUT"
+          Rscript --vanilla analysis/final_ji3_nca_fsqca_rerun_20260818/run_final_ji3_nca_fsqca.R \
+            2>&1 | tee "$H_DUAL_SET_OUT/ACTION_RUN_LOG.txt"
+
+      - name: Independent aggregate QA and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/final_ji3_results"
+          test -f "$OUT/NCA_ALL_RESULTS.csv"
+          test -f "$OUT/NCA_ALL_BOTTLENECKS.csv"
+          test -f "$OUT/FSQCA_MAIN_INTERMEDIATE_SOLUTIONS.csv"
+          test -f "$OUT/FSQCA_CALIBRATION_ANCHORS.csv"
+          test -f "$OUT/H1565_NCA_STABILITY.csv"
+          test -f "$OUT/H1565_FSQCA_STABILITY.csv"
+          test -f "$OUT/VALIDATION.json"
+          python3 - <<'PY'
+          import json, os, pandas as pd
+          from pathlib import Path
+          out = Path(os.environ['RUNNER_TEMP'])/'final_ji3_results'
+          nca = pd.read_csv(out/'NCA_ALL_RESULTS.csv')
+          assert len(nca) == 44, len(nca)
+          assert set(nca['spec_id']) == {'S1_JI3','R6_JI3'}, set(nca['spec_id'])
+          assert (nca['test_rep'] == 2000).all()
+          assert set(nca['ceiling_method']) == {'CE-FDH','CR-FDH'}
+          settings = pd.read_csv(out/'FSQCA_SETTINGS.csv')
+          assert set(settings['setting_id']) == {'main_h','strict_PRI85','incl90','ncut10','ncut20'}
+          assert (settings['calibration_mode'] == 'p5_50_95').all()
+          anchors = pd.read_csv(out/'FSQCA_CALIBRATION_ANCHORS.csv')
+          assert set(anchors['calibration_mode']) == {'p5_50_95'}
+          v = json.load(open(out/'VALIDATION.json'))
+          assert v['checks']['nca_all_rows_present'] is True
+          assert v['checks']['nca_all_2000_permutations'] is True
+          assert v['checks']['nca_fast_equivalence'] is True
+          assert v['checks']['fsqca_sensitivity_complete'] is True
+          qa = {
+            'status':'PASS', 'source_commit':os.environ['SOURCE_COMMIT'],
+            'nca_rows':len(nca), 'nca_specs':sorted(set(nca['spec_id'])),
+            'fsqca_settings':settings['setting_id'].tolist(),
+            'calibration_modes':sorted(set(anchors['calibration_mode'])),
+            'raw_private_data_committed_to_public_repo':False
+          }
+          json.dump(qa, open(out/'INDEPENDENT_QA_PUBLIC_RUNNER.json','w'), indent=2)
+          print(json.dumps(qa, indent=2))
+          PY
+          if find "$OUT" -type f \( -iname '*.dta' -o -iname '*.rds' -o -iname '*h1449*.csv' -o -iname '*h1565*.csv' \) | grep -q .; then
+            echo "Forbidden row-level/private output detected in aggregate output directory" >&2
+            exit 9
+          fi
+          {
+            echo "source_commit=$SOURCE_COMMIT"
+            echo "base_runner_sha256=$(sha256sum source/analysis/h_dual_sample_nca_fsqca_20260816/run_h_dual_sample_nca_fsqca.R | awk '{print $1}')"
+            echo "ji3_wrapper_sha256=$(sha256sum source/analysis/final_ji3_nca_fsqca_rerun_20260818/run_final_ji3_nca_fsqca.R | awk '{print $1}')"
+            echo "workflow_run_id=$GITHUB_RUN_ID"
+          } > "$OUT/RUN_PROVENANCE.txt"
+          find "$OUT" -maxdepth 1 -type f -print | sort
+
+      - name: Upload aggregate results only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-ji3-nca-fsqca-20260819
+          path: ${{ runner.temp }}/final_ji3_results/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 9
