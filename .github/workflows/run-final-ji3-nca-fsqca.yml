@@ -44,7 +44,9 @@ jobs:
           Rscript --vanilla - <<'RS'
           options(repos = c(CRAN = "https://cloud.r-project.org"), timeout = 1200)
           if (!requireNamespace("remotes", quietly = TRUE)) install.packages("remotes")
-          wanted <- c(jsonlite="1.8.8", NCA="5.0.2", QCA="3.25", Rcpp="1.1.2")
+          # Install dependency-heavy analytical packages first, then re-pin jsonlite/Rcpp.
+          # This changes only environment bootstrap order; the Work-built analysis code is untouched.
+          wanted <- c(NCA="5.0.2", QCA="3.25", jsonlite="1.8.8", Rcpp="1.1.2")
           for (p in names(wanted)) {
             ok <- requireNamespace(p, quietly=TRUE) && as.character(packageVersion(p)) == wanted[[p]]
             if (!ok) remotes::install_version(p, version=wanted[[p]], dependencies=TRUE, upgrade="never")
